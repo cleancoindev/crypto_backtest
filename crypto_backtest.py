@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from broker import Broker
+from broker import Account, Broker
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +23,17 @@ class CryptoBacktest:
 
     def __init__(self, data):
         """
+        TODO: Abstract this from USD and BTC specific accounts
+
         :param data: dataframe to run backtest on
         """
 
         self.data = data
         self.strategies = []
-        self.broker = Broker(data, 'Close', ['USD', 'BTC'], [1000, 0])
+
+        usd_account = Account('USD', 1000)
+        btc_account = Account('BTC', 0, 'Close')
+        self.broker = Broker(data, [usd_account, btc_account])
 
 
     def add_strategy(self, strategy):
@@ -66,7 +71,7 @@ class CryptoBacktest:
         TODO: Share X axis with Candlesticks and account data
         """
 
-        account_subplots = self.broker.accounts.shape[1]
+        account_subplots = self.broker.accounts_df.shape[1]
         data_subplots = 2
 
         total_rows = account_subplots + data_subplots

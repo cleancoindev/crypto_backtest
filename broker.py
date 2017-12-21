@@ -46,13 +46,36 @@ class Order:
         self.credit_total = 0.0
 
 
+class Account:
+    """
+    Attributes:
+        currency: the currency symbol
+        starting_balance: the starting balance of the account
+        price_column: data column to use for currency price
+    """
+
+    def __init__(self, symbol, starting_balance, price_column=None):
+        """
+        Set `price_column` if the total value of the account should be in a
+        different denomination.
+
+        :param symbol: the currency symbol
+        :param starting_balance: the starting balance of the account
+        :param price_column: data column to use for currency price
+        """
+        self.symbol = symbol
+        self.price_column = price_column
+        self.starting_balance = starting_balance
+
+
 class Broker:
     """
     Attributes:
         data: full dataframe for the backtest
-        price_column: column in data to use for price
-        accounts: dataframe of account values during the backtest
         starting_balances: starting account balances
+        price_columns: dict mapping price_columns to accounts
+        account_symbols: symbols of all the accounts registered
+        accounts_df: dataframe of account values during the backtest
         index: the current index of the data as the backtest runs
         orders: the list of pending orders
     """
@@ -61,23 +84,23 @@ class Broker:
     DEFAULT_LIMIT_FEE = 0.0
     DEFAULT_MARKET_FEE = 0.0025
 
-    def __init__(self, data, price_column, accounts, balances,
-            limit_fee=DEFAULT_LIMIT_FEE,
+    def __init__(self, data, accounts, limit_fee=DEFAULT_LIMIT_FEE,
             market_fee=DEFAULT_MARKET_FEE):
         """
         :param data: full dataframe for the backtest
-        :param price_column: column in data to use for price
-        :param accounts: list of account names
-        :param balances: list of starting balances of each account
+        :param accounts: list of account instances
         :param limit_fee: fee for limit orders
         :param market_fee: fee for market orders
         """
 
         self.data = data
-        self.price_column = price_column
 
-        self.accounts = pd.DataFrame(index=data.index, columns=accounts)
-        self.starting_balances = balances
+        self.starting_balances = [a.starting_balance for a in accounts]
+        self.price_columns = {a.symbol: a.price_column for a in accounts}
+
+        self.account_symbols = [a.symbol for a in accounts]
+        self.accounts_df = pd.DataFrame(index=data.index,
+                columns=self.account_symbols)
 
         metric_columns = ['Total Value', 'Return', 'Cumulative Return']
         self.metrics = pd.DataFrame(index=data.index, columns=metric_columns)
@@ -91,13 +114,13 @@ class Broker:
 
 
     def get_account_balance(self, account):
-        balance = self.accounts.loc[self.index, account]
+        balance = self.accounts_df.loc[self.index, account]
 
         return balance
 
 
     def set_account_balance(self, account, balance):
-        self.accounts.loc[self.index, account] = balance
+        self.accounts_df.loc[self.index, account] = balance
 
 
     def populate_account_balances(self):
@@ -108,16 +131,28 @@ class Broker:
         for this iteration in the backtest.
         """
 
-        prev_index = self.accounts.index.get_loc(self.index) - 1
+        prev_index = self.accounts_df.index.get_loc(self.index) - 1
 
         if prev_index >= 0:
-            self.accounts.loc[self.index,:] = self.accounts.iloc[prev_index,:]
+            self.accounts_df.loc[self.index,:] = self.accounts_df.iloc[prev_index,:]
         else:
-            self.accounts.loc[self.index,:] = self.starting_balances
+            self.accounts_df.loc[self.index,:] = self.starting_balances
 
 
-    def get_current_price(self):
-        return self.data.loc[self.index,self.price_column]
+    def get_current_price(self, account):
+        """
+        :param account: the account to get the current price for
+        """
+
+        try:
+            column = self.price_columns[account]
+        except KeyError:
+            return None
+
+        try:
+            return self.data.loc[self.index,column]
+        except ValueError:
+            return None
 
 
     def handle_limit_order(self, order):
@@ -125,7 +160,7 @@ class Broker:
         :param order: limit order to process
         """
 
-        current_price = self.get_current_price()
+        current_price = self.get_current_price(order.base)
 
         is_buy_order = order.side == Order.BUY_SIDE
         is_price_greater = order.price >= current_price
@@ -161,22 +196,32 @@ class Broker:
     def calculate_total_value(self):
         """
         Calculate total value of all accounts and all pending orders
-
-        TODO: Abstract this from USD and BTC specific accounts
         """
 
-        usd = self.get_account_balance('USD')
-        btc = self.get_account_balance('BTC')
+        balances = {}
+
+        for symbol in self.account_symbols:
+            balances[symbol] = self.get_account_balance(symbol)
 
         for order in self.orders:
             if order.status == Order.PENDING_STATUS:
                 if order.side == Order.BUY_SIDE:
-                    usd += order.debit_total
+                    balances[order.quote] += order.debit_total
                 elif order.side == Order.SELL_SIDE:
-                    btc += order.debit_total
+                    balances[order.base] += order.debit_total
 
-        btc_in_usd = btc * self.data.loc[self.index, self.price_column]
-        total_value = usd + btc_in_usd
+        total_value = 0
+
+        for symbol in self.account_symbols:
+            current_price = self.get_current_price(symbol)
+
+            # If no current price exists, just use the balance
+            try:
+                converted_price = balances[symbol] * current_price
+            except TypeError:
+                converted_price = balances[symbol]
+
+            total_value += converted_price
 
         self.metrics.loc[self.index, 'Total Value'] = total_value
 
@@ -315,7 +360,7 @@ class Broker:
         order.credit_account = base
         order.debit_account = quote
 
-        price = self.get_current_price()
+        price = self.get_current_price(base)
 
         order.price = price
         order.size = size
@@ -340,7 +385,7 @@ class Broker:
         order.credit_account = quote
         order.debit_account = base
 
-        price = self.get_current_price()
+        price = self.get_current_price(base)
 
         order.price = price
         order.size = size
@@ -368,6 +413,7 @@ class Broker:
 
     def calculate_metrics(self):
         """
+        TODO: Abstract this from USD and BTC specific accounts
         """
 
         self.metrics['Return'] = self.metrics['Total Value'].pct_change()
@@ -375,7 +421,7 @@ class Broker:
 
         sharpe = self.metrics['Return'].mean() / self.metrics['Return'].std()
 
-        benchmark = self.data[self.price_column].pct_change()
+        benchmark = self.data[self.price_columns['BTC']].pct_change()
         benchmark_sharpe = benchmark.mean() / benchmark.std()
 
         print('Sharpe Ratio: {}'.format(sharpe))
@@ -387,7 +433,7 @@ class Broker:
         :param axes: chart axes
         """
 
-        for i, column in enumerate(self.accounts):
-            self.accounts[column].plot(ax=axes[data_subplots + i], legend=True)
+        for i, column in enumerate(self.accounts_df):
+            self.accounts_df[column].plot(ax=axes[data_subplots + i], legend=True)
 
         self.metrics.plot(subplots=True)
